@@ -1,4 +1,5 @@
 from flask import Flask, request, Response
+from collections import OrderedDict
 
 app = Flask(__name__)
 
@@ -7,52 +8,84 @@ app = Flask(__name__)
 def home():
     return "<p>Hello World</p>"
 
-
 @app.route('/score', methods=["POST"])
 def score():
     error_msg = ''
-    json_req = request.get_json()
-    cols = ['odor', 'stalk_root', 'stalk_surface_below_ring', 'spore_print_color']
+    raw_column_data = request.get_json()
+    required_cols = ['odor', 'stalk_root', 'stalk_surface_below_ring', 'spore_print_color']
+    column_data_relevant = get_relevant_column_data(raw_column_data, required_cols)
+    missing_cols = get_missing_cols(required_cols, column_data_relevant.keys())
 
-    missing_cols = set(cols) - set(json_req.keys())
+    # Generate missing column error message
+    if missing_cols: error_msg += missing_col_error_msg(missing_cols)
 
-    # Invalid columns - not all input columns specified
-    if len(missing_cols) != 0:
-        error_msg += 'Not all columns were specified for model. Missing columns: \n\t' + '\n\t'.join(list(missing_cols)) + '\n'
-    
-    # Invalid feature values
-    column_vals = [json_req[col].strip() if col in json_req else None for col in cols]
-    valid_input = validate_input(*column_vals)
-    if not all(valid_input):
-        invalid_input_info = ''
-        for idx, val in enumerate(column_vals):
-            if not valid_input[idx] and val is not None:
-                invalid_input_info += f'\n    {val} is not a valid value for {cols[idx]}'
-        if invalid_input_info:
-            error_msg += 'Input is invalid:' + invalid_input_info
-    if error_msg:
+    # Check for valid feature values
+    validity_check = validate_input(column_data_relevant, required_cols, validity_fn)
+    if not all(validity_check.values()):
+        error_msg += invalid_input_error_msg(validity_check, column_data_relevant)
+
+    if error_msg: # If there are any errors, return error message with 400 response
         return Response(error_msg, status=400)
 
-    feature_values = extract_features(*[json_req[col] for col in cols])
+    feature_values = extract_features(*column_data_relevant.values())
     return Response(response=str(int(score_input(*feature_values))), status=200)
 
-def validate_input(odor, stalk_root, stalk_surface_below_ring, spore_print_color):
+def get_relevant_column_data(json_request, required_columns):
+    """Returns only relevant data columns from the request for model scoring"""
+    rtn = OrderedDict()
+    for col in required_columns:
+        if col in json_request:
+            rtn[col] = json_request[col]
+    return rtn
+
+def get_missing_cols(input_cols, required_cols):
+    """Determines missing input cols for model"""
+    return set(input_cols) - set(required_cols)
+
+def missing_col_error_msg(missing_cols):
+    """Generates error message based on missing columns"""
+    return 'Not all columns were specified for model. Missing columns: \n\t' \
+        + '\n\t'.join(list(missing_cols)) + '\n'
+
+def validity_fn(attribute, value):
     """
-    Validates that request data is within allowed categories for features. Permitted categories
-    and their associated meanings are:
+    Determine validity for an attribute and corresponding value for that attribute.
     
+    Permitted categories and their associated meanings are:
     odor	Feature	Categorical		almond=a,anise=l,creosote=c,fishy=y,foul=f, musty=m,none=n,pungent=p,spicy=s
     stalk-root	Feature	Categorical		bulbous=b,club=c,cup=u,equal=e,rhizomorphs=z,rooted=r,missing=?
     stalk-surface-below-ring	Feature	Categorical		fibrous=f,scaly=y,silky=k,smooth=s
     spore-print-color	Feature	Categorical		black=k,brown=n,buff=b,chocolate=h,green=r, orange=o,purple=u,white=w,yellow=y
     """
-    odor_valid = odor in ['a', 'l', 'c', 'y', 'f', 'm', 'n', 'p', 's']
-    stalk_root_valid = stalk_root in ['b','c','u','e','z','r','?']
-    stalk_surface_below_ring_valid = stalk_surface_below_ring in ['f','y','k','s']
-    spore_print_color_valid = spore_print_color in ['k','n','b','h','r','o','u','w','y']
+    validity_map = {
+        'odor': ['a', 'l', 'c', 'y', 'f', 'm', 'n', 'p', 's'],
+        'stalk_root': ['b','c','u','e','z','r','?'],
+        'stalk_surface_below_ring': ['f','y','k','s'],
+        'spore_print_color': ['k','n','b','h','r','o','u','w','y']
+    }
 
-    return (odor_valid, stalk_root_valid, stalk_surface_below_ring_valid, spore_print_color_valid)
+    return attribute in validity_map and value in validity_map[attribute]
 
+def validate_input(data, required_cols, validity_fn):
+    """
+    General function to validate data based on the data provided, the columns required,
+    and a validity function that takes in the current attribute/value.
+    """
+    rtn = {}
+
+    for col in required_cols:
+        if col in data:
+            rtn[col] = validity_fn(col, data[col])
+    return rtn
+    
+def invalid_input_error_msg(validity_check, data):
+    """Generates error message for invalid input (e.g. bad column values)"""
+    invalid_input_info = ''
+    for k,v in validity_check.items():
+        if not v:
+            val = data[k]
+            invalid_input_info += f'\n    "{val}" is not a valid value for "{k}"'
+    return 'Input is invalid:' + invalid_input_info
 
 def extract_features(odor, stalk_root, stalk_surface_below_ring, spore_print_color):
     """
@@ -64,8 +97,8 @@ def extract_features(odor, stalk_root, stalk_surface_below_ring, spore_print_col
         int(spore_print_color == 'r'), int(odor == 'a'), int(odor == 'l')
     )
 
-
 def score_input(odor_n, stalk_root_c, stalk_surface_below_ring_y, spore_print_color_r, odor_a, odor_l):
+    """Function to mimic behavior of pre-trained decision tree from scikit-learn"""
     if odor_n <= 0.5:
         if stalk_root_c <= 0.5:
             if stalk_surface_below_ring_y <= 0.5:
